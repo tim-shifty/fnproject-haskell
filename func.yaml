@@ -1,0 +1,8 @@
+schema_version: 20180708
+name: haskell-hello
+version: 0.0.1
+runtime: docker
+triggers:
+- name: haskell-hello-trigger
+  type: http
+  source: /haskell-hello

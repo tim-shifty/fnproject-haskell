@@ -15,9 +15,9 @@ import Foreign.Marshal.Alloc (malloc, free)
 import Foreign.Marshal.Array (peekArray)
 import qualified Data.ByteString as Bs
 import qualified Text.JSON as Js
-import Text.Parsec (parse, ParseError, (<|>), try, choice, skipMany1, between,
-    eof, many, many1)
-import Text.Parsec.Char (oneOf, noneOf, space, spaces, newline, crlf, satisfy,
+import Text.Parsec (parse, ParseError, (<|>), (<?>), try, choice,
+    skipMany, skipMany1, between, eof, many, many1)
+import Text.Parsec.Char (oneOf, noneOf, space, spaces, satisfy,
     char, string, anyChar, endOfLine)
 import Text.Parsec.ByteString (Parser)
 
@@ -127,16 +127,13 @@ mediaParametersParse = many $ do
         parseValue = many1 $ noneOf "\r\n\";"
 
 hspace :: Parser ()
-hspace = skipMany1 $ oneOf " \t"
+hspace = skipMany $ oneOf " \t"
 
 token :: Parser String
-token = many1 $ satisfy (not . isSpace)
+token = many1 $ noneOf " \r\n\t:"
 
 notEndOfLine :: Char -> Bool
-notEndOfLine c = case generalCategory c of
-    LineSeparator -> False
-    ParagraphSeparator -> False
-    _ -> True
+notEndOfLine c = c `notElem` "\r\n\x2028\x2029"
 
 restOfLine :: Parser String
 restOfLine = many $ satisfy notEndOfLine
@@ -144,7 +141,7 @@ restOfLine = many $ satisfy notEndOfLine
 skipEol :: Parser ()
 skipEol = do
     hspace
-    endOfLine
+    endOfLine <?> "skipEol"
     return ()
 
 parseTopLine :: Parser (String,String)
@@ -160,13 +157,14 @@ parseTopLine = do
 
 -- parses lines of the form xxxx: yyyyy\n followed by a blank line
 parseHeaders :: Parser [(String,String)]
-parseHeaders = (endOfLine >> return []) <|> parseAtLeastOneHeader where
+parseHeaders = (endOfLine >> return []) <|> try parseAtLeastOneHeader where
     parseAtLeastOneHeader = do
         lhs <- token
+        hspace
         char ':'
         hspace
         rhs <- restOfLine
-        endOfLine
+        endOfLine <?> "end-of-header"
         rest <- parseHeaders
         return $ (lhs,rhs):rest
 
@@ -179,16 +177,20 @@ requestParser = do
     (url, protocol) <- parseTopLine
     headers <- parseHeaders
     body <- parseBody
+    eof
     return $ getRequest url protocol headers body
+
+showStatus :: HttpT.Status -> String
+showStatus st = show (HttpT.statusCode st) ++ " " ++ Utf8.toString (HttpT.statusMessage st)
 
 sendResponse :: So.Socket -> Response -> IO ()
 sendResponse sock response = let
     pairToString (k,v) = k ++ ": " ++ v ++ "\n"
     headers = concat $ map pairToString $ responseHeaders response
-    s = "HTTP/1.1 "
-        ++ show (responseCode response)
-        ++ "\nFn-Fdk-version:fdk-haskell/0.0.1\nContent-type: text/plain\n"
-        ++ headers ++ "\n" ++ responseBody response
+    s = "HTTP/1.1 " ++ showStatus (responseCode response)
+        ++ "\nFn-Fdk-Version: fdk-haskell/0.0.1\nContent-type: text/plain\n\n"
+        ++ headers ++ "\n"
+        ++ responseBody response
     bs = Utf8.fromString s
     in Sobs.sendAll sock bs
 
@@ -202,7 +204,16 @@ handleRawRequest sock = let
     in do
         request <- Sobs.recv sock 8192
         response <- parseAndHandle request
-        sendResponse sock response
+--        sendResponse sock response
+-- debugging:
+        sendResponse sock $ Response
+            { responseCode = HttpT.ok200
+            , responseHeaders = responseHeaders response
+            , responseBody = responseBody response
+                ++ "\nStatus: " ++ showStatus (responseCode response)
+                ++ "\n\n" ++ Utf8.toString request
+            }
+
 
 data ConfigurationException = ConfigurationException String deriving Show
 
